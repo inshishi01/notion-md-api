@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 export const dynamic = 'force-dynamic';
 
-// 样式映射表
+// 样式映射表 (保持不变)
 const notionColors = {
   "gray": "color: #9B9A97;",
   "brown": "color: #64473A;",
@@ -32,51 +32,48 @@ export async function GET(request) {
   const download = searchParams.get('download');
   const token = process.env.NOTION_TOKEN;
 
-  // 检查配置
-  if (!token) return NextResponse.json({ error: "Missing NOTION_TOKEN in Vercel env" }, { status: 500 });
-  if (!pageId) return NextResponse.json({ error: "Missing 'page_id' in URL" }, { status: 400 });
+  if (!token || !pageId) return NextResponse.json({ error: "Config Error" }, { status: 500 });
 
   try {
     const notion = new Client({ auth: token });
     const n2m = new NotionToMarkdown({ notionClient: notion });
 
-    // === 自定义: Toggle 折叠列表 ===
-    n2m.setCustomTransformer("toggle", async (block) => {
-      const text = block.toggle.rich_text.map(t => t.plain_text).join("");
-      const children = await n2m.pageToMarkdown(block.id);
-      const childrenMd = n2m.toMarkdownString(children).parent;
-      return `<details><summary style="cursor: pointer; font-weight: bold;">${text}</summary><div style="padding-left: 20px;">\n${childrenMd}\n</div></details>`;
-    });
-
-    // === 自定义: Paragraph (修复版) ===
-    // 我们不再使用 return false，而是手动处理所有段落，确保稳健
+    // === 关键修复：智能段落处理 ===
+    // 只有在段落有颜色时才自定义，否则交给库默认处理
     n2m.setCustomTransformer("paragraph", async (block) => {
       const { paragraph } = block;
-      if (!paragraph.rich_text || paragraph.rich_text.length === 0) {
-        return ""; // 空行
-      }
+      const color = paragraph.color;
 
-      // 手动拼接文本和链接
-      const textContent = paragraph.rich_text.map(t => {
-        let txt = t.plain_text;
-        // 简单的加粗/斜体处理 (HTML方式，兼容性更好)
-        if (t.annotations.bold) txt = `<b>${txt}</b>`;
-        if (t.annotations.italic) txt = `<i>${txt}</i>`;
-        if (t.annotations.code) txt = `\`${txt}\``;
-        if (t.href) txt = `<a href="${t.href}">${txt}</a>`;
-        return txt;
-      }).join("");
-
-      // 如果有颜色，加 div；如果没有，直接返回文本
-      const colorStyle = notionColors[paragraph.color];
-      if (colorStyle) {
-        return `<div style="${colorStyle}">${textContent}</div>`;
-      } else {
-        return `${textContent}\n\n`; // 默认情况，加换行
+      if (color === 'default') {
+        // 没有颜色，返回 false，让 nottion-to-md 用默认的、最稳定的方式处理
+        return false;
       }
+      
+      // 有颜色，我们手动处理
+      // 先让库把内部的文本（加粗、链接等）转成 Markdown
+      const defaultMarkdown = await n2m.blockToMarkdown(paragraph.rich_text);
+      
+      // 然后我们给它包上一层带颜色的 div
+      const style = notionColors[color] || "";
+      return `<div style="${style}">${defaultMarkdown}</div>`;
     });
 
-    // === 自定义: Callout ===
+    // === 自定义: Toggle 折叠列表 (逻辑加固) ===
+    n2m.setCustomTransformer("toggle", async (block) => {
+      if (!block.has_children) {
+        // 如果折叠列表是空的，只显示标题
+        const summaryText = block.toggle.rich_text.map(t => t.plain_text).join("");
+        return `<details><summary style="cursor: pointer; font-weight: bold;">${summaryText}</summary><div></div></details>`;
+      }
+      
+      const summaryText = block.toggle.rich_text.map(t => t.plain_text).join("");
+      const children = await n2m.pageToMarkdown(block.id);
+      const childrenMd = n2m.toMarkdownString(children).parent;
+      
+      return `<details><summary style="cursor: pointer; font-weight: bold;">${summaryText}</summary><div style="padding-left: 20px;">${childrenMd}</div></details>`;
+    });
+
+    // === 自定义: Callout (保持不变) ===
     n2m.setCustomTransformer("callout", async (block) => {
       const text = block.callout.rich_text.map(t => t.plain_text).join("");
       const icon = block.callout.icon?.emoji || "💡";
@@ -87,38 +84,23 @@ export async function GET(request) {
       </div>`;
     });
 
-    // === 执行转换 ===
-    // 1. 获取页面信息 (用于标题)
+    // === 执行转换流程 (保持不变) ===
     const pageData = await notion.pages.retrieve({ page_id: pageId });
-    
-    // 2. 获取 Block 内容
     const mdblocks = await n2m.pageToMarkdown(pageId);
     const mdString = n2m.toMarkdownString(mdblocks);
 
-    // === 调试检查: 如果内容为空 ===
     if (!mdString.parent || mdString.parent.trim().length === 0) {
-      console.log("Empty content detected. Check permissions.");
-      return NextResponse.json({ 
-        error: "No content found.", 
-        hint: "Please make sure you have clicked 'Add Connections' -> 'Your Integration Name' on the Notion page.",
-        debug_page_id: pageId
-      }, { status: 404 });
+      return NextResponse.json({ error: "No content found. Check Notion permissions." }, { status: 404 });
     }
 
-    // 提取标题
     let title = "Notion-Export";
     try {
       const titleProp = Object.values(pageData.properties).find(p => p.type === 'title');
       if (titleProp) title = titleProp.title[0]?.plain_text || "Untitled";
     } catch (e) {}
 
-    // 组合输出
     const finalOutput = `# ${title}\n\n${mdString.parent}`;
-
-    // 设置 Header
-    const headers = {
-      "Content-Type": "text/markdown; charset=utf-8",
-    };
+    const headers = { "Content-Type": "text/markdown; charset=utf-8" };
     if (download === 'true') {
       headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(title)}.md"`;
     }
@@ -127,6 +109,6 @@ export async function GET(request) {
 
   } catch (error) {
     console.error("API Error:", error);
-    return NextResponse.json({ error: error.message, stack: error.stack }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
