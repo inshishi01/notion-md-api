@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 export const dynamic = 'force-dynamic';
 
-// 样式映射表 (保持不变)
+// === 1. Notion 颜色映射表 (CSS样式) ===
 const notionColors = {
   "gray": "color: #9B9A97;",
   "brown": "color: #64473A;",
@@ -26,6 +26,14 @@ const notionColors = {
   "red_background": "background: #FBE4E4; padding: 2px 5px; border-radius: 3px;",
 };
 
+// 辅助函数：给内容包裹颜色样式
+function wrapColor(content, color) {
+  if (!color || color === 'default') return content;
+  const style = notionColors[color] || "";
+  // 使用 span 或 div 包裹，为了不破坏 Markdown 的块级结构，这里用 div 比较安全，但行内用 span
+  return `<div style="${style}">${content}</div>`;
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const pageId = searchParams.get('page_id');
@@ -38,77 +46,101 @@ export async function GET(request) {
     const notion = new Client({ auth: token });
     const n2m = new NotionToMarkdown({ notionClient: notion });
 
-    // === 关键修复：智能段落处理 ===
-    // 只有在段落有颜色时才自定义，否则交给库默认处理
-    n2m.setCustomTransformer("paragraph", async (block) => {
-      const { paragraph } = block;
-      const color = paragraph.color;
-
-      if (color === 'default') {
-        // 没有颜色，返回 false，让 nottion-to-md 用默认的、最稳定的方式处理
-        return false;
-      }
-      
-      // 有颜色，我们手动处理
-      // 先让库把内部的文本（加粗、链接等）转成 Markdown
-      const defaultMarkdown = await n2m.blockToMarkdown(paragraph.rich_text);
-      
-      // 然后我们给它包上一层带颜色的 div
-      const style = notionColors[color] || "";
-      return `<div style="${style}">${defaultMarkdown}</div>`;
-    });
-
-    // === 自定义: Toggle 折叠列表 (逻辑加固) ===
+    // === 2. 自定义转换器：折叠列表 (Toggle) ===
     n2m.setCustomTransformer("toggle", async (block) => {
-      if (!block.has_children) {
-        // 如果折叠列表是空的，只显示标题
-        const summaryText = block.toggle.rich_text.map(t => t.plain_text).join("");
-        return `<details><summary style="cursor: pointer; font-weight: bold;">${summaryText}</summary><div></div></details>`;
-      }
+      const { toggle } = block;
+      // 获取标题文本
+      const text = toggle.rich_text.map(t => t.plain_text).join("");
       
-      const summaryText = block.toggle.rich_text.map(t => t.plain_text).join("");
+      // 获取折叠内部的子块 (递归转换)
       const children = await n2m.pageToMarkdown(block.id);
       const childrenMd = n2m.toMarkdownString(children).parent;
+
+      // 获取颜色样式
+      const style = notionColors[block.toggle.color] || "";
+      const styleAttr = style ? ` style="${style}"` : "";
+
+      // 返回 HTML <details> 标签
+      return `
+<details${styleAttr}>
+<summary style="cursor: pointer; font-weight: bold;">${text}</summary>
+<div style="padding-left: 20px; margin-top: 10px;">
+
+${childrenMd}
+
+</div>
+</details>`;
+    });
+
+    // === 3. 自定义转换器：段落 (Paragraph) 以保留颜色 ===
+    // 注意：如果你覆盖了 paragraph，所有普通文本都会走这里
+    n2m.setCustomTransformer("paragraph", async (block) => {
+      const { paragraph } = block;
+      // 转换内部的 rich_text (包含加粗、斜体等)
+      // notion-to-md 内部暂时没有直接暴露 textToMarkdown，我们需要手动拼接或者简化处理
+      // 简单处理：只取纯文本，或者保留加粗链接等 (需要调用内部方法，这里简化为纯文本+颜色)
       
-      return `<details><summary style="cursor: pointer; font-weight: bold;">${summaryText}</summary><div style="padding-left: 20px;">${childrenMd}</div></details>`;
+      // 实际上，n2m 默认处理已经很好，为了颜色，我们需要劫持
+      // 如果没有颜色，返回 false 让库使用默认处理，性能更好
+      if (block.paragraph.color === 'default') {
+        return false; 
+      }
+
+      const text = paragraph.rich_text.map(t => {
+         let content = t.plain_text;
+         if (t.annotations.bold) content = `**${content}**`;
+         if (t.annotations.italic) content = `*${content}*`;
+         if (t.annotations.code) content = `\`${content}\``;
+         if (t.href) content = `[${content}](${t.href})`;
+         return content;
+      }).join("");
+
+      if (!text) return ""; // 空行
+
+      // 包裹颜色
+      return wrapColor(text, block.paragraph.color);
     });
 
-    // === 自定义: Callout (保持不变) ===
+    // === 4. 自定义转换器：Callout (标注块) 颜色增强 ===
     n2m.setCustomTransformer("callout", async (block) => {
-      const text = block.callout.rich_text.map(t => t.plain_text).join("");
-      const icon = block.callout.icon?.emoji || "💡";
-      const style = notionColors[block.callout.color] || "background: #f1f1f1;";
-      return `<div style="${style} padding: 12px; display: flex; border-radius: 4px; margin: 8px 0;">
-        <span style="margin-right: 8px; font-size: 1.2em;">${icon}</span>
-        <span>${text}</span>
-      </div>`;
+      const { callout } = block;
+      const text = callout.rich_text.map(t => t.plain_text).join("");
+      const icon = callout.icon?.emoji || "💡";
+      const style = notionColors[callout.color] || "background: #f1f1f1;"; // 默认灰色背景
+
+      return `<div style="${style} padding: 16px; display: flex; border-radius: 4px; margin: 1em 0;">
+  <div style="font-size: 24px; margin-right: 12px;">${icon}</div>
+  <div style="align-self: center;">${text}</div>
+</div>`;
     });
 
-    // === 执行转换流程 (保持不变) ===
-    const pageData = await notion.pages.retrieve({ page_id: pageId });
+
+    // === 执行转换 ===
     const mdblocks = await n2m.pageToMarkdown(pageId);
     const mdString = n2m.toMarkdownString(mdblocks);
-
-    if (!mdString.parent || mdString.parent.trim().length === 0) {
-      return NextResponse.json({ error: "No content found. Check Notion permissions." }, { status: 404 });
-    }
-
+    
+    // 简单获取标题用于文件名
+    const pageData = await notion.pages.retrieve({ page_id: pageId });
     let title = "Notion-Export";
     try {
-      const titleProp = Object.values(pageData.properties).find(p => p.type === 'title');
-      if (titleProp) title = titleProp.title[0]?.plain_text || "Untitled";
-    } catch (e) {}
+        const titleProp = Object.values(pageData.properties).find(p => p.type === 'title');
+        if(titleProp) title = titleProp.title[0]?.plain_text || "Untitled";
+    } catch(e) {}
 
-    const finalOutput = `# ${title}\n\n${mdString.parent}`;
-    const headers = { "Content-Type": "text/markdown; charset=utf-8" };
+    const headers = {
+      "Content-Type": "text/markdown; charset=utf-8",
+    };
     if (download === 'true') {
       headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(title)}.md"`;
     }
 
+    // 拼接标题和内容
+    const finalOutput = `# ${title}\n\n${mdString.parent}`;
+
     return new Response(finalOutput, { status: 200, headers });
 
   } catch (error) {
-    console.error("API Error:", error);
+    console.error(error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
