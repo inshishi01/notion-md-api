@@ -29,16 +29,18 @@ export async function GET(request) {
     const mdblocks = await n2m.pageToMarkdown(pageId);
     const mdString = n2m.toMarkdownString(mdblocks);
 
+
+    const mdContent = mdString.parent;
     // 返回纯文本 Response，而不是 JSON
     return new Response(mdContent, {
-        status: 200,
-        headers: {
-        // 告诉浏览器这是一个 Markdown 文件
-        "Content-Type": "text/markdown; charset=utf-8",
-        // 如果想访问时直接下载文件，取消下面这行的注释:
-        // "Content-Disposition": 'attachment; filename="export.md"',
-        },
-    });
+    status: 200,
+    headers: {
+    // 告诉浏览器这是一个 Markdown 文件
+    "Content-Type": "text/markdown; charset=utf-8",
+    // 如果想访问时直接下载文件，取消下面这行的注释:
+    // "Content-Disposition": 'attachment; filename="export.md"',
+  },
+});
 
   } catch (error) {
     console.error(error);
