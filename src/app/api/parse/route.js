@@ -29,11 +29,15 @@ export async function GET(request) {
     const mdblocks = await n2m.pageToMarkdown(pageId);
     const mdString = n2m.toMarkdownString(mdblocks);
 
-    // 6. 返回结果 (包含 Markdown 字符串)
-    // parent: mdString.parent 是页面主要内容的 markdown
-    return NextResponse.json({ 
-      status: "success",
-      data: mdString.parent 
+    // 返回纯文本 Response，而不是 JSON
+    return new Response(mdContent, {
+        status: 200,
+        headers: {
+        // 告诉浏览器这是一个 Markdown 文件
+        "Content-Type": "text/markdown; charset=utf-8",
+        // 如果想访问时直接下载文件，取消下面这行的注释:
+        // "Content-Disposition": 'attachment; filename="export.md"',
+        },
     });
 
   } catch (error) {
